@@ -1,0 +1,192 @@
+#!/bin/sh
+
+PID_FILE="/var/run/freetzlogd.pid"
+LOG_PIPE_BASE_DIR="/var/log/mod_pipes"
+subshell_pids=""
+
+term_sig="n"
+trap "term_sig=y" SIGINT INT TERM EXIT
+
+self_stop() {
+    local exit_code=$1
+    [ -f "$PID_FILE" ] && rm -f "$PID_FILE"
+    [ -n "$subshell_pids" ] && kill_subshell_pids
+    [ -n "$exit_code" ] && exit $exit_code
+    exit 0
+}
+
+# Logging Base -------------------------------------------------------------------
+. /etc/init.d/loglibrc
+
+log() {
+    local msg=$1
+    loglib_system "FREETZ-LOGD" "$msg"
+    echo "[FREETZ-LOGD] $msg" >> "/var/log/mod.log"
+}
+
+# Logger Subshell Functions  ------------------------------------------------------
+
+kill_subshell_pids() {
+    for entry in $subshell_pids; do
+        local entry_name=$(echo "$entry" | cut -d':' -f1)
+        local entry_pid=$(echo "$entry" | cut -d':' -f2)
+        remove_subshell_pid "$entry_name"
+    done
+}
+
+get_subshell_pid() {
+    local name=$1
+    for entry in $subshell_pids; do
+        local entry_name=$(echo "$entry" | cut -d':' -f1)
+        local entry_pid=$(echo "$entry" | cut -d':' -f2)
+        if [ "$entry_name" == "$name" ]; then
+            echo "$entry_pid"
+            break
+        fi
+    done
+}
+
+remove_subshell_pid() {
+    local name=$1
+
+    local pid=$(get_subshell_pid "$name")
+    if [ -n "$pid" ] && cat /proc/$pid/comm &>/dev/null; then
+        kill "$pid"
+    fi
+
+    subshell_pids=$(echo $subshell_pids | sed "s/^${name}:[0-9]*//g;s/\s\+${name}:[0-9]*//g")
+}
+
+add_subshell_pid() {
+    local name=$1
+    local pid=$2
+
+    remove_subshell_pid $name
+    subshell_pids="$subshell_pids ${name}:${pid}"
+}
+
+is_running_subshell_pid() {
+    local name=$1
+    local pid=$(get_subshell_pid $name)
+    if cat /proc/$pid/comm &>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Logger Watchdog  ----------------------------------------------------------------
+
+subshell_watchdog() {
+    for entry in $subshell_pids; do
+        local entry_name=$(echo "$entry" | cut -d':' -f1)
+        local entry_pid=$(echo "$entry" | cut -d':' -f2)
+        if ! cat /proc/$entry_pid/comm &>/dev/null; then
+            log "Logger for $entry_name ... failed."
+            run_logger_for "$entry_name"
+        fi
+    done
+}
+
+# Logger -------------------------------------------------------------------------
+
+run_logger() {
+    local logfile=""
+    local logdir=""
+    local daemon_name=""
+    local ident=""
+    local do_systemlog="n"
+
+    while getopts "i:l:n:s" opt; do
+        case $opt in
+            i)
+                ident=$OPTARG
+                ;;
+            l) 
+                logfile=$OPTARG
+                logdir=$(dirname $logfile)
+                ;;
+            n)
+                daemon_name=$OPTARG
+                ;;
+            s)
+                do_systemlog="y"
+                ;;            
+            *)
+                ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    if [ -n $ident ]; then
+        local pipe="$LOG_PIPE_BASE_DIR/log_${ident}"
+
+        (
+            # Rename this subshell in order to get a better overview with ps command.
+            # procfs only accepts renaming from owning pid, so this has to be done from within this subshell
+            local self_pid=$(exec sh -c 'echo "$PPID"')
+            printf "log-${ident}" > /proc/$self_pid/comm
+
+            [ ! -d "$LOG_PIPE_BASE_DIR" ] && mkdir "$LOG_PIPE_BASE_DIR"
+            [ ! -p $pipe ] && mkfifo $pipe
+
+            while true; do 
+                _logger() {
+                    local _log="$(cat)" # save stdin to _log
+                    [ -z "$_log" ] && return
+                    if [ $do_systemlog == "y" ] && [ -n $daemon_name ]; then 
+                        loglib_system "$daemon_name" "$_log"
+                    fi
+                    if [ -n $logfile ] && [ -d $logdir ] && [ -w $logdir ]; then 
+                        echo "$_log" >> "$logfile"
+                    fi
+                }
+                _logger < "$pipe"
+            done
+        ) &
+
+        add_subshell_pid "$ident" "$!"
+
+        if is_running_subshell_pid "$ident"; then
+            log "Starting $ident logger ... done."
+        else
+            log "Starting $ident logger ... failed."
+        fi
+    fi
+}
+
+run_logger_for() {
+    local name=$1
+    case $name in
+        dsld)
+            run_logger -si "dsld" -n "AVM-DSLD" -l "/var/log/mod_net.log"
+            ;;
+        multid)
+            run_logger -si "multid" -n "AVM-MULTID" -l "/var/log/mod_net.log"
+            ;;
+        *)
+            ;;
+    esac
+}
+
+# Main ---------------------------------------------------------------------------
+
+echo $$ > "$PID_FILE"
+
+# Run logging subshells 
+run_logger_for dsld
+run_logger_for multid
+
+# If we have supervisor, notify that we are ready.
+# This is important for correct service handling.
+[ -x /bin/svctl ] && /bin/svctl notify $(basename $0) &>/dev/null
+
+while true; do
+    if [ "$term_sig" == "y" ]; then
+        break
+    fi
+    subshell_watchdog
+    usleep 500000
+done
+
+self_stop

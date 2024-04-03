@@ -1,0 +1,159 @@
+#!/bin/sh
+
+. /etc/init.d/modlibrc
+[ -r /etc/options.cfg ] && . /etc/options.cfg
+
+DAEMON=freetzlogd
+DAEMON_BIN=freetzlogd
+DAEMON_SV_NAME=freetzlogd
+DAEMON_LONG_NAME="FREETZ-LOGD"
+PID_FILE=/var/run/${DAEMON}.pid
+
+if ! modlib_check_supervisor_direct; then
+    IS_SUPERVISOR="n"
+else
+    IS_SUPERVISOR="y"
+fi
+
+log() {
+    local msg=$1
+    [ "$IS_SUPERVISOR" == "n" ] && echo "$msg"
+    loglib_system "$DAEMON_LONG_NAME" "$msg"
+    echo "$msg" >> "/var/log/mod.log"
+}
+
+start() {
+
+    local quiet_already_running="n"
+    [ "$1" == "1" ] && quiet_already_running="y"
+
+    if status &>/dev/null; then
+        # Already running
+        [ "$quiet_already_running" == "n" ] && \
+            log "Starting ${DAEMON_LONG_NAME} ... already running."
+        exit 0
+    fi
+
+    if [ "$FREETZ_AVM_HAS_SVCTL" == "y" ] && [ "$IS_SUPERVISOR" == "n" ]; then
+        if [ $PPID -eq 1 ] && [ "$(cat /proc/$PPID/comm 2>/dev/null)" == "init" ]; then
+			# Do nothing for init. Supervisor should handle this!
+			exit 0
+		fi
+
+        echo "Initializing start of ${DAEMON_LONG_NAME}"
+
+        # Caution this can cause an endless loop, which will make supervisor crash
+        # Always make sure, in "$DAEMON_SV_NAME.service" file, that this script gets called directly or,
+        # if a script chain is needed, the chain calls every following script/binary with "exec" command.
+        svctl start $DAEMON_SV_NAME &> /dev/null
+        svctl --quiet is-active $DAEMON_SV_NAME
+        if [ $? -eq 0 ]; then 
+            echo "Starting ${DAEMON_LONG_NAME} ... done."
+            exit 0
+        else
+            echo "Starting ${DAEMON_LONG_NAME} ... failed."
+            exit 1
+        fi
+    fi
+
+    log "Initializing start of ${DAEMON_LONG_NAME}"
+    
+    if [ "$FREETZ_AVM_HAS_SVCTL" == "y" ]; then
+        # Don't use a subshell, like "(...code...) &", here. 
+        # It will produce a zombie process once exec gets executed
+        /bin/sh -c "\
+			. /etc/init.d/modlibrc; \
+            msg='Starting ${DAEMON_LONG_NAME} ...'; \
+			if modlib_check_pid_running $PID_FILE 5 $DAEMON_BIN; then \
+                msg=\"\${msg} done.\"; \
+			else \
+                msg=\"\${msg} failed.\"; \
+			fi; \
+            loglib_system "$DAEMON_LONG_NAME" \"\$msg\"; \
+			echo \"\$msg\" >> "/var/log/mod.log"; \
+		" &    
+    
+        exec /usr/bin/$DAEMON_BIN 2>/dev/null
+        exit $? # Never reached, as log as exec (not the command) isn't failing
+    else
+        /usr/bin/$DAEMON_BIN 2>/dev/null &
+        exitval=$?
+    fi
+
+    if [ "$exitval" -eq 0 ]; then
+        log "Starting ${DAEMON_LONG_NAME} ... done."
+    else
+        log "Starting ${DAEMON_LONG_NAME} ... failed."
+        exit $exitval
+    fi
+}
+
+stop() {
+    local DAEMON_PID=$(cat $PID_FILE 2>/dev/null)
+    local retval=1
+
+    if ! status &>/dev/null; then
+        retval=0
+    else
+        if [ "$FREETZ_AVM_HAS_SVCTL" == "y" ] && [ "$IS_SUPERVISOR" == "n" ]; then
+            svctl stop $DAEMON_SV_NAME &> /dev/null
+            svctl --quiet is-active $DAEMON_SV_NAME
+            if [ $? -ne 0 ]; then
+                retval=0
+            else
+                retval=1
+            fi
+        else
+            # Don't use `kill -9`, this would not trigger, buildin, 
+            # child processes removal, of freetzlogd.
+            kill $DAEMON_PID
+            retval=$?
+        fi
+    fi
+
+    if [ $retval -eq 0 ]; then
+        log "Stopping ${DAEMON_LONG_NAME} ... done."
+        return 0
+    else
+        log "Stopping ${DAEMON_LONG_NAME} ... failed."
+        return 1
+    fi
+}
+
+status() {
+    local DAEMON_PID=$(cat $PID_FILE 2>/dev/null)
+    if [ -z $DAEMON_PID ] || [ $(cat /proc/$DAEMON_PID/comm 2>/dev/null) != "$DAEMON_BIN" ]; then
+        echo 'stopped'
+        return 1
+    else
+        echo 'running'
+        return 0
+    fi
+}
+
+case $1 in
+    start)
+        start
+        ;;
+    start_from_daemon)
+        start 1
+        ;;
+    stop)
+        stop
+        exit $?
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    status)
+        status
+        exit $?
+        ;;
+    *)
+        echo "Usage: $0 [start|stop|restart|status]" 1>&2
+        exit 1
+        ;;
+esac
+
+exit 0

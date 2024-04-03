@@ -1,0 +1,12 @@
+[Unit]
+Before=multid.service
+After=network-pre.target
+
+[Service]
+Type=notify
+ExecStart=/etc/init.d/rc.freetzlogd start
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
