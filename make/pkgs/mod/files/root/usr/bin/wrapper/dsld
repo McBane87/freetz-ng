@@ -1,12 +1,28 @@
 #!/bin/sh
-. /etc/init.d/loglibrc
 
-log() {
-	local _log="$(cat)" # save stdin to _log
-	[ -z "$_log" ] && return
-	loglib_system "AVM-DSLD" "$_log"
-	echo "$_log" >> /var/log/mod_net.log
-}
+. /etc/init.d/loglibrc
+LOG_PIPE="/var/log/mod_pipes/log_dsld"
+
+# Very important!
+#   $LOG_PIPE is provided and processed by freetzlogd.
+#   We need to make sure it is running before we start to log.
+#   If nothing is listining, on the other end of $LOG_PIPE, and we send a log message,
+#   it (this script/process) will block until finally some process will read the message.
+/etc/init.d/rc.freetzlogd start_from_daemon &>/dev/null
+i=0; while [ ! -p "$LOG_PIPE" ] && [ $i -lt 10 ]; do
+	sleep 1; i=$(($i+1))
+done
+
+if [ ! -p "$LOG_PIPE" ]; then
+	msg="Starting dsld ... failed. ($LOG_PIPE does not exist. Please check freetzlogd.)"
+	loglib_system "AVM-DSLD" "$msg"
+	echo "$msg" >> /var/log/mod_net.log
+	exit 1
+fi
+
+# Log every output, within this process, to given file/pipe.
+# This, automatically, gets inherited by all following process, that are called with exec.
+exec &> "$LOG_PIPE"
 
 daemon_mode=start
 while [ $# -gt 0 ]; do
@@ -15,5 +31,6 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-/etc/init.d/rc.dsld $daemon_mode 2>&1 | log
-
+# Exec makes sure rc.dsld will not become a new process, 
+# which would generate new PID and PPID. Instead it will override this process and inherit its PIDs.
+exec /etc/init.d/rc.dsld $daemon_mode

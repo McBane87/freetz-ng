@@ -2,6 +2,7 @@
 
 DAEMON=multid
 DAEMON_BIN=multid
+DAEMON_SV_NAME=multid
 DAEMON_LONG_NAME="AVM-$DAEMON"
 CONF_NAME=avm
 . /etc/init.d/modlibrc
@@ -14,6 +15,25 @@ TMPFILE="/tmp/.multid."
 
 start() {
 	echo -n "Starting ${DAEMON_LONG_NAME} ... "
+
+	if [ "$FREETZ_AVM_HAS_SVCTL" == "y" ] && ! modlib_check_supervisor_direct; then
+		if [ $PPID -eq 1 ] && [ "$(cat /proc/$PPID/comm 2>/dev/null)" == "init" ]; then
+			# Do nothing for init. Supervisor should handle this!
+			exit 0
+		fi
+		# Caution this can cause an endless loop, which will make supervisor crash
+		# Always make sure, in "multid.service" file, that this script gets called directly or,
+		# if a script chain is needed (like multid wrapper), the chain calls every following script/binary with "exec" command.
+		svctl start $DAEMON_SV_NAME &> /dev/null
+		svctl --quiet is-active $DAEMON_SV_NAME
+		if [ $? -eq 0 ]; then
+			echo 'done.'
+			exit 0
+		else
+			echo 'failed.'
+			exit 1
+		fi
+	fi
 
 	if [ -e ${TMPFILE}IGD ]; then
 		DAEMON_CMD_IGD=$(cat ${TMPFILE}IGD)
@@ -54,7 +74,10 @@ start() {
 	#save ipv6 for 'lan' (since fw 04.86)
 	if [ -e /proc/sys/net/ipv6/conf/lan/disable_ipv6 ]; then
 		local addresses_ipv6_lan="$(ifconfig lan | sed -rn 's/.*inet6 addr: (.*) Scope:Global/\1/p')"
+		echo "$addresses_ipv6_lan" > /tmp/multid_addresses_ipv6_lan
+
 		local disable_ipv6_lan="$(cat /proc/sys/net/ipv6/conf/lan/disable_ipv6)"
+		echo "$disable_ipv6_lan" > /tmp/multid_disable_ipv6_lan
 	fi
 
 	rm -rf /var/tmp/avm-resolv.conf /var/tmp/resolv.conf 2>/dev/null
@@ -67,19 +90,59 @@ start() {
 		local _unbound_enabled="$(modconf value UNBOUND_ENABLED unbound 2>/dev/null)"
 		if [ "$_resolv_conf_dns" == "127.0.0.1" -a "$_bind_enabled" != yes -a "$_dnsmasq_dns_enabled" != yes -a "$_unbound_enabled" != yes ]; then
 			echo -n "discarded libmultid, no enabled dns server ... "
+			local use_preload="n"
 		else
-			export LD_PRELOAD=libmultid.so
+			local use_preload="y"
 		fi
 	fi
-	if modlib_check_supervisor; then
-		nohup $DAEMON_BIN $DAEMON_CMD_IGD $DAEMON_CMD_NTP $DAEMON_CMD_069 $DAEMON_CMD_IGM 0</dev/null 1>/dev/null 2>&1 &
-		exitval=0
+	if [ "$FREETZ_AVM_HAS_SVCTL" == "y" ]; then
+		# Don't use a subshell, like "(...code...) &", here.
+		# It will produce a zombie process once "exec" gets executed
+		/bin/sh -c "\
+			. /etc/init.d/modlibrc; \
+			sleep 1; $0 start_postconfigs; \
+			if modlib_check_pid_running $PID_FILE 5 $DAEMON_BIN; then \
+				echo 'done.'; \
+			else \
+				echo 'failed.'; \
+			fi \
+		" &
+
+		[ "$use_preload" == "y" ] && export LD_PRELOAD=libmultid.so
+		exec $DAEMON_BIN $DAEMON_CMD_IGD $DAEMON_CMD_NTP $DAEMON_CMD_069 $DAEMON_CMD_IGM 2>/dev/null
+		exitval=$?; unset LD_PRELOAD; exit $exitval # Never reached, as log as exec (not the command) isn't failing
 	else
+		[ "$use_preload" == "y" ] && export LD_PRELOAD=libmultid.so
 		$DAEMON_BIN $DAEMON_CMD_IGD $DAEMON_CMD_NTP $DAEMON_CMD_069 $DAEMON_CMD_IGM 2>/dev/null
 		exitval=$?
 	fi
 	unset LD_PRELOAD
 	sleep 1
+
+	start_postconfigs
+
+	if [ "$exitval" -eq 0 ]; then
+		echo 'done.'
+	else
+		echo 'failed.'
+		exit $exitval
+	fi
+}
+
+# "start_post" already used by modlibrc for other purpose,
+# so lets use "start_postconfigs"
+start_postconfigs() {
+
+	local addresses_ipv6_lan=""
+	local disable_ipv6_lan=""
+
+	if [ -r "/tmp/multid_addresses_ipv6_lan" ]; then
+		local addresses_ipv6_lan=$(cat /tmp/multid_addresses_ipv6_lan)
+	fi
+	if [ -r "/tmp/multid_disable_ipv6_lan" ]; then
+		local disable_ipv6_lan=$(cat /tmp/multid_disable_ipv6_lan)
+	fi
+
 	[ -f /tmp/flash/mod/multid.start ] && . /tmp/flash/mod/multid.start
 
 	#load ipv6 for 'lan' (since fw 04.86)
@@ -99,13 +162,6 @@ start() {
 	for resolv_file in /var/tmp/avm-resolv.conf /var/tmp/resolv.conf; do
 		[ ! -e $resolv_file ] && echo "nameserver 127.0.0.1" > $resolv_file
 	done
-
-	if [ "$exitval" -eq 0 ]; then
-		echo 'done.'
-	else
-		echo 'failed.'
-		exit $exitval
-	fi
 }
 
 stop() {
@@ -135,6 +191,9 @@ case $1 in
 		;;
 	start)
 		modlib_start
+		;;
+	start_postconfigs)
+		start_postconfigs
 		;;
 	stop)
 		modlib_stop
