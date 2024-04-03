@@ -20,3 +20,27 @@ loglib_system() {
 	loglib_logger "$@"
 }
 
+loglib_log() {
+	local _DAEMON_LONG_NAME=$1
+	local _logfile=$2
+	local _log="$3"
+
+	if [ -z "$_log" ] || [ -z "$_logfile" ] || [ ! -w $(dirname "$_logfile") ]; then 
+		return
+	fi
+
+	# This results in the PID of the main script. (The one outside this function)
+	# But only if this not becomes a subshell. In this case it would hold the PID of this subshell.
+	local xpid=$(exec sh -c 'echo "$PPID"')
+	local fd_stdout="$(stat -L -c "%d:%i" /proc/$xpid/fd/1 2>/dev/null)"
+	local fd_logfile="$(stat -L -c "%d:%i" $_logfile 2>/dev/null)"
+
+	loglib_system "$_DAEMON_LONG_NAME" "$_log"
+	echo "$_log"
+
+	# If we are not already redirect any stdout to logfile, then,
+	# additionally, add log to logfile.
+	if [ "$fd_stdout" != "$fd_logfile" ]; then
+		echo "$_log" >> "$_logfile"
+	fi
+}

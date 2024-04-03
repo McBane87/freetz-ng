@@ -28,6 +28,7 @@
 : ${DAEMON_BIN:=$DAEMON}
 : ${PID_FILE:=/var/run/${DAEMON_BIN}.pid}
 : ${DAEMON_CFGFILE:=/tmp/flash/${DAEMON}/${DAEMON}.cfg}
+: ${TARGET_LOGFILE:=/dev/null}
 
 # config:
 #   dummy function if "config" is not defined in parent-script
@@ -49,6 +50,10 @@ stop_pre() { :; }
 #   dummy function if "stop_post" is not defined in parent-script
 #   parameter $1: return-value of stop(), 0=sucessfully
 stop_post() { :; }
+
+modlib_log() {
+	loglib_log ${DAEMON_LONG_NAME} ${TARGET_LOGFILE} "$1"
+}
 
 
 # modlib_defaults:
@@ -149,6 +154,44 @@ modlib_check_running() {
 	fi
 }
 
+# modlib_check_pid_running
+#   checks if given pid, in pidfile, is running.
+#	parameter:
+#		$1 (required) pidfile
+#		$2 (required) timeout in seconds
+#		$2 (optional) name
+#	return values:
+#		0: running
+#		1: not running
+
+modlib_check_pid_running() {
+	local pidfile=$1
+	local timeout=$(($2*1000000))
+	local name=$3
+	local interval=250000 # 0.25s
+	local returnval=1
+
+	[ -z $(echo "$timeout" | egrep '^[0-9]+$') ] && return 1
+
+	i=0
+	while [ $i -lt $timeout ]; do
+		if [ -f "$pidfile" ]; then
+			local pid_name=$(grep '^Name:' /proc/$(cat "$pidfile" 2>/dev/null)/status 2>/dev/null | awk '{print $2}')
+			if [ -n "$name" ] && [ "$name" == "$pid_name" ]; then
+				returnval=0
+				break
+			elif [ -z "$name" ] && [ -n "$pid_name" ]; then
+				returnval=0
+				break
+			fi
+		fi
+		usleep $interval
+		i=$(($i+$interval))
+	done
+
+	return $returnval
+}
+
 # modlib_config
 #    creates /mod/etc/$DAEMON.conf
 #    parameters:
@@ -184,11 +227,10 @@ modlib_config() {
 #    use $DAEMON_BIN for other binary name than $DAEMON
 #    use $DAEMON_ENV for additional environment settings
 modlib_startdaemon() {
-	echo -n "Starting ${DAEMON_LONG_NAME} ... "
 	config
 
 	if [ ! -x "$(which $1)" ]; then
-		echo "could not execute $1, failed."
+		modlib_log "Starting ${DAEMON_LONG_NAME} ... could not execute $1, failed."
 		exit 1
 	fi
 
@@ -200,7 +242,7 @@ modlib_startdaemon() {
 	local rv_post=$?
 
 	if [ $rv_pre -ne 0 -o $rv -ne 0 -o $rv_post -ne 0 ]; then
-		echo 'failed.'
+		modlib_log "Starting ${DAEMON_LONG_NAME} ... failed."
 		exit $rv
 	fi
 
@@ -209,13 +251,13 @@ modlib_startdaemon() {
 	if [ ! -s "$fn" ]; then
 		local dp=$(pidof "$DAEMON_BIN" | sed 's/.* //')
 		if [ $? -ne 0 ]; then
-			echo 'failed.'
+			modlib_log "Starting ${DAEMON_LONG_NAME} ... failed."
 			exit 1
 		fi
 		[ -n "$dp" ] && echo "$dp" > $fn
 	fi
 
-	echo 'done.'
+	modlib_log "Starting ${DAEMON_LONG_NAME} ... done."
 }
 
 # modlib_start
@@ -230,17 +272,17 @@ modlib_start() {
 	[ -n "$DAEMON_ENABLED" ] && [ "$PID_FILE" != "/var/run/${DAEMON}.pid" ] && ln -sf "${PID_FILE#/var/run/}" "/var/run/${DAEMON}.pid"
 
 	if [ "$DAEMON_ENABLED" == "no" ]; then
-		echo "${DAEMON_LONG_NAME} is disabled." 1>&2
+		modlib_log "${DAEMON_LONG_NAME} is disabled." 1>&2
 		exit 1
 	fi
 	if [ "$DAEMON_ENABLED" == "inetd" -a ! -x /mod/etc/init.d/rc.inetd ]; then
-		echo "WARNING: ${DAEMON_LONG_NAME} could not find inetd." 1>&2
+		modlib_log "WARNING: ${DAEMON_LONG_NAME} could not find inetd." 1>&2
 	fi
 
 	modlib_check_running
 	case $? in
 		0)
-			echo "Starting ${DAEMON_LONG_NAME} ... already running."
+			modlib_log "Starting ${DAEMON_LONG_NAME} ... already running."
 			;;
 		3)
 			start
@@ -251,7 +293,7 @@ modlib_start() {
 			/mod/etc/init.d/rc.inetd config $DAEMON
 			;;
 		*)
-			echo "${DAEMON_LONG_NAME} start prohibited, status is uncertain!" 1>&2
+			modlib_log "${DAEMON_LONG_NAME} start prohibited, status is uncertain!" 1>&2
 			;;
 	esac
 	return 1
@@ -301,7 +343,6 @@ stop() {
 modlib_stop() {
 	local fn=$PID_FILE
 	local id=$(cat "$fn" 2>/dev/null)
-	echo -n "Stopping ${DAEMON_LONG_NAME} ... "
 	modlib_check_running
 	case $? in
 		0)
@@ -311,21 +352,21 @@ modlib_stop() {
 			stop_post $retval
 			if ! kill -0 $id 2>/dev/null && [ "$retval" -eq 0 ]; then
 				rm -f "$fn"
-				echo 'done.'
+				modlib_log "Stopping ${DAEMON_LONG_NAME} ... done."
 			else
-				echo 'failed.'
+				modlib_log "Stopping ${DAEMON_LONG_NAME} ... failed."
 				return $retval
 			fi
 			;;
 		3)
-			echo 'not running.'
+			modlib_log "Stopping ${DAEMON_LONG_NAME} ... not running."
 			;;
 		5)
 			stop 5
-			echo 'inetd instances killed, done.'
+			modlib_log "Stopping ${DAEMON_LONG_NAME} ... inetd instances killed, done."
 			;;
 		*)
-			echo 'status unknown, failed.'
+			modlib_log "Stopping ${DAEMON_LONG_NAME} ... status unknown, failed."
 			return 1
 			;;
 	esac
@@ -335,7 +376,6 @@ modlib_stop() {
 # modlib_force_stop
 #   forces stop of the daemon
 modlib_force_stop() {
-	echo -n "Stopping ${DAEMON_LONG_NAME} forced ... "
 	FORCE_STATUS="0"
 	modlib_stop >/dev/null
 	if [ -e /mod/etc/default.$DAEMON/*.inetd ]; then
@@ -343,7 +383,7 @@ modlib_force_stop() {
 		modlib_stop >/dev/null
 	fi
 	FORCE_STATUS=""
-	echo 'done.'
+	modlib_log "Stopping ${DAEMON_LONG_NAME} forced ... done."
 }
 
 # modlib_restart
@@ -383,7 +423,6 @@ reload() {
 #   reloads daemon with "reload" of rc.$DAEMON if available
 modlib_reload() {
 	local fn=$PID_FILE
-	echo -n "Reloading ${DAEMON_LONG_NAME} ... "
 	modlib_check_running
 	case $? in
 		0)
@@ -391,24 +430,24 @@ modlib_reload() {
 			reload 0
 			local retval=$?
 			if [ $retval -eq 0 ]; then
-				echo 'done.'
+				modlib_log "Reloading ${DAEMON_LONG_NAME} ... done."
 				return 0
 			else
 				rm -f "$fn"
-				echo 'failed.'
+				modlib_log "Reloading ${DAEMON_LONG_NAME} ... failed."
 				return $retval
 			fi
 			;;
 		3)
-			echo 'not running.'
+			modlib_log "Reloading ${DAEMON_LONG_NAME} ... not running."
 			;;
 		5)
 			config
 			reload 5
-			echo 'inetd.'
+			modlib_log "Reloading ${DAEMON_LONG_NAME} ... inetd."
 			;;
 		*)
-			echo 'status unknown, failed.'
+			modlib_log "Reloading ${DAEMON_LONG_NAME} ... status unknown, failed."
 			return 1
 			;;
 		esac
@@ -459,7 +498,7 @@ modlib_add_httpd_symlink() {
 }
 
 # modlib_check_supervisor
-#   checks if the script is started by avm-svctl.
+#   checks if the script is started by avm-svctl or avm-svctl is one of the parents in process tree.
 #   return values:
 #    0: true
 #    1: false
@@ -470,6 +509,16 @@ modlib_check_supervisor() {
 		XPID="$(sed -n 's/^PPid:[\t ]*//p' /proc/$XPID/status 2>/dev/null)"
 	done
 	[ "$NAME" == "supervisor" ]
+}
+
+# modlib_check_supervisor_direct
+#   checks if the script is started by avm-svctl directly.
+#   return values:
+#    0: true
+#    1: false
+modlib_check_supervisor_direct() {
+	local XPID="$PPID"
+	[ "$(grep '^Name:' /proc/$XPID/status 2>/dev/null | awk '{print $2}')" == "supervisor" ]
 }
 
 # load config

@@ -1,12 +1,8 @@
 #!/bin/sh
-. /etc/init.d/loglibrc
 
-log() {
-	local _log="$(cat)" # save stdin to _log
-	[ -z "$_log" ] && return
-	loglib_system "AVM-DSLD" "$_log"
-	echo "$_log" >> /var/log/mod_net.log
-}
+# Redirect all output of this script and childs, called by exec, 
+# to the given logfile
+exec >> "/var/log/mod_net.log" 2>&1
 
 daemon_mode=start
 while [ $# -gt 0 ]; do
@@ -15,5 +11,6 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-/etc/init.d/rc.dsld $daemon_mode 2>&1 | log
-
+# Exec makes sure rc.dsld will not become a new process, 
+# which would generate new PID and PPID. Instead it will override this process and inherit its PIDs.
+exec /etc/init.d/rc.dsld $daemon_mode

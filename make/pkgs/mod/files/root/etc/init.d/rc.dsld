@@ -3,8 +3,10 @@
 . /etc/init.d/modlibrc
 DAEMON=dsld
 DAEMON_BIN=dsld
+DAEMON_SV_NAME=dsld
 DAEMON_LONG_NAME="AVM-$DAEMON"
 PID_FILE=/var/run/${DAEMON}.pid
+TARGET_LOGFILE="/var/log/mod_net.log"
 
 TMPFILE="/tmp/.dsld."
 
@@ -13,7 +15,22 @@ TMPFILE="/tmp/.dsld."
 . /bin/env.mod.rcconf avm
 
 start() {
-	echo -n "Starting ${DAEMON_LONG_NAME} ... "
+	if [ "$FREETZ_AVM_HAS_SVCTL" == "y" ] && ! modlib_check_supervisor_direct; then
+		# Caution this can cause an endless loop, which will make supervisor crash
+		# Always make sure, in "dsld.service" file, that this script gets called directly or,
+		# if a script chain is needed (like dsld wrapper), the chain calls every following script/binary with "exec" command.
+		svctl start $DAEMON_SV_NAME &> /dev/null
+		svctl --quiet is-active $DAEMON_SV_NAME
+		if [ $? -eq 0 ]; then
+			echo "Starting ${DAEMON_LONG_NAME} ... done."
+			exit 0
+		else
+			echo "Starting ${DAEMON_LONG_NAME} ... failed."
+			exit 1
+		fi
+	fi
+
+	modlib_log "Initializing ${DAEMON_LONG_NAME}"
 
 	if [ -e ${TMPFILE}CMD ]; then
 		DAEMON_CMD="$(cat ${TMPFILE}CMD)"
@@ -41,17 +58,28 @@ start() {
 
 	#remove duplicate arguments
 	DAEMON_ARGS="$(for arg in $DAEMON_CMD $DAEMON_OPT; do [ "$arg" != "dsld" ] && echo " $arg"; done |sort -u)"
-	if modlib_check_supervisor; then
-		nohup $DAEMON_BIN $DAEMON_ARGS 0</dev/null 1>/dev/null 2>&1 &
-		exitval=0
+	if [ "$FREETZ_AVM_HAS_SVCTL" == "y" ]; then
+		# Don't use a subshell, like "(...code...) &", here.
+		# It will produce a zombie process once "exec" gets executed
+		/bin/sh -c "\
+			. /etc/init.d/modlibrc; \
+			if modlib_check_pid_running $PID_FILE 5 $DAEMON_BIN; then \
+				loglib_log '${DAEMON_LONG_NAME}' '$TARGET_LOGFILE' 'Starting ${DAEMON_LONG_NAME} ... done.'; \
+			else \
+				loglib_log '${DAEMON_LONG_NAME}' '$TARGET_LOGFILE' 'Starting ${DAEMON_LONG_NAME} ... failed.'; \
+			fi \
+		" &
+
+		exec $DAEMON_BIN $DAEMON_ARGS 2>/dev/null
+		exit $? # Never reached, as log as exec (not the command) isn't failing
 	else
 		$DAEMON_BIN $DAEMON_ARGS 2>/dev/null
 		exitval=$?
 	fi
 	if [ "$exitval" -eq 0 ]; then
-		echo 'done.'
+		modlib_log "Starting ${DAEMON_LONG_NAME} ... done."
 	else
-		echo 'failed.'
+		modlib_log "Starting ${DAEMON_LONG_NAME} ... failed."
 		exit $exitval
 	fi
 }
