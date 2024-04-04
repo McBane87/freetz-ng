@@ -173,6 +173,14 @@ modlib_check_pid_running() {
 
 	[ -z $(echo "$timeout" | egrep '^[0-9]+$') ] && return 1
 
+	if [ "$(busybox --list 2>/dev/null | grep usleep)" == "usleep" ]; then
+		local sleep_cmd=usleep
+	else
+		local sleep_cmd=sleep
+		interval=$(($interval/1000000)); [ $interval -eq 0 ] && interval=1
+		timeout=$(($timeout/1000000)); [ $timeout -eq 0 ] && timeout=1
+	fi
+
 	i=0
 	while [ $i -lt $timeout ]; do
 		if [ -f "$pidfile" ]; then
@@ -185,7 +193,7 @@ modlib_check_pid_running() {
 				break
 			fi
 		fi
-		usleep $interval
+		$sleep_cmd $interval
 		i=$(($i+$interval))
 	done
 
